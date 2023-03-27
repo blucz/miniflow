@@ -1,0 +1,22 @@
+[env]
+BRANCH = 'production'
+
+[steps.foo]
+cmd = "sleep 3; echo hello, foo"
+cwd = '.'
+env = { "ABC" = 123 }
+
+[steps.bar]
+cmd = "sleep 2; echo hello, bar"
+cwd = '.'
+deps = [ "foo" ]
+
+[steps.baz]
+cmd = "sleep 4; echo hello, baz"
+cwd = '.'
+deps = [ "foo" ]
+
+[steps.quux]
+cmd = "sleep 3; echo hello, quux"
+cwd = '.'
+deps = [ "bar", "baz" ]
