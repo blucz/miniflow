@@ -11,8 +11,8 @@ export function formatDuration(ms: number): string {
   if (d > 1) { return `${d.toFixed(0)}d ${h.toFixed(0)}h ${m.toFixed(0)}m`; }
   if (h > 1) { return `${h.toFixed(0)}h ${m.toFixed(0)}m`; } 
   if (m > 1) { return `${m.toFixed(0)}m ${s.toFixed(0)}s`; }
-  if (s > 1) { return `${s.toFixed(0)}s`; }
-  return `${ms.toFixed(0)}ms`;
+  if (s > 1) { return `${s.toFixed(1)}s`; }
+  return `${(ms/1000).toFixed(1)}s`;
 }
 
 export function truncateOneLine(s: string): string {

@@ -1,5 +1,11 @@
 import * as colors from "https://deno.land/std@0.179.0/fmt/colors.ts";
 
+let _debug = false;
+
+export function setDebug(debug: boolean): void {
+  _debug = debug;
+}
+
 function timestamp() : string {
   return colors.white(`${new Date().toLocaleString()}  `);
 }
@@ -17,7 +23,9 @@ export function error(...args: unknown[]): void {
 }
 
 export function debug(...args: unknown[]): void {
-  //console.log(timestamp(), colors.green(args.join(" ")));
+  if (_debug) {
+    console.log(timestamp(), colors.green(args.join(" ")));
+  }
 }
 
 export function subproc(...args: unknown[]): void {

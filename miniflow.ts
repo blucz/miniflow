@@ -6,9 +6,9 @@ import * as toml from "https://deno.land/std@0.180.0/encoding/toml.ts";
 import * as colors from "https://deno.land/std@0.179.0/fmt/colors.ts";
 
 import { FlowToml, StateJson, Flow, Step, StepState, StepRun } from "./model.ts";
-import { formatDuration, truncateOneLine, mergeStreams, logSubprocessToConsole } from "./utils.ts";
+import { formatDuration, truncateOneLine, mergeStreams } from "./utils.ts";
 
-import { info, trace, error, debug } from "./log.ts";
+import { info, trace, error, debug, setDebug } from "./log.ts";
 
 const APP_NAME              = "miniflow";
 const STATE_JSON_FILENAME   = "state.json";
@@ -46,10 +46,11 @@ function usage() {
   console.error("    env = { 'ENV_VAR': 'value' } # Environment variables (optional)");
   console.error("");
   console.error("    [steps.print-world]");
-  console.error("    cmd = 'echo world'           # Command to run");
-  console.error("    deps = ['print-hello']       # List of steps that this step depends on");
-  console.error("    cwd = '.'                    # Working directory (optional, defaults to flow file directory)");
-  console.error("    env = { 'ENV_VAR': 'value' } # Environment variables (optional)");
+  console.error("    desc = 'Prints \"world\"'     # Short human-readbale description of what the step does");
+  console.error("    cmd  = 'echo world'           # Command to run");
+  console.error("    deps = ['print-hello']        # List of steps that this step depends on");
+  console.error("    cwd  = '.'                    # Working directory (optional, defaults to flow file directory)");
+  console.error("    env  = { 'ENV_VAR': 'value' } # Environment variables (optional)");
   console.error("");
   console.error("NOTES");
   console.error("");
@@ -57,6 +58,21 @@ function usage() {
   console.error(`    to your .gitignore.`);
   console.error("");
   Deno.exit(1);
+}
+
+type Colorizer = (input: string) => string;
+
+function getColorizer(state: StepState): Colorizer {
+  switch (state) {
+    case StepState.none:          return colors.gray;        break;
+    case StepState.waitingForRun: return colors.yellow;      break;
+    case StepState.waitingForDep: return colors.yellow;      break;
+    case StepState.depFailed:     return colors.red;         break;
+    case StepState.succeeded:     return colors.green;       break;
+    case StepState.running:       return colors.brightGreen; break;
+    case StepState.failed:        return colors.brightRed;   break;
+    default: return (s) => s;
+  }
 }
 
 class Context {
@@ -93,15 +109,7 @@ class Context {
     for (let step of this.flow.steps) {
       let colorstate = step.state.toString();
       let stateNameMaxLen = Object.values(StepState).reduce((max, state) => Math.max(max, state.length), 0);
-      switch (step.state) {
-        case StepState.none:          colorstate = colors.gray(step.state.padEnd(stateNameMaxLen));      break;
-        case StepState.waitingForRun: colorstate = colors.yellow(step.state.padEnd(stateNameMaxLen));    break;
-        case StepState.waitingForDep: colorstate = colors.yellow(step.state.padEnd(stateNameMaxLen));    break;
-        case StepState.depFailed:     colorstate = colors.red(step.state.padEnd(stateNameMaxLen));       break;
-        case StepState.succeeded:     colorstate = colors.green(step.state.padEnd(stateNameMaxLen));     break;
-        case StepState.running:       colorstate = colors.blue(step.state.padEnd(stateNameMaxLen));      break;
-        case StepState.failed:        colorstate = colors.brightRed(step.state.padEnd(stateNameMaxLen)); break;
-      }
+      colorstate = getColorizer(step.state)(step.state.padEnd(stateNameMaxLen));
       let stepNameMaxLen = this.flow.steps.reduce((max, step) => Math.max(max, step.name.length), 0);
 
       let runinfo = "";
@@ -176,15 +184,17 @@ async function loadFlow(flowFile: string, state: StateJson) : Promise<Flow> {
   }
 }
 
-async function runStep(ctx: Context, step: Step) : Promise<void> {
+async function runStep(activeSteps: Step[], ctx: Context, step: Step) : Promise<void> {
+  activeSteps.push(step);
+
   let startTime = new Date();
   const filenameSafeDate = startTime.toISOString().replace(/:/g, "-").replace(/\./g, "-");
-  let logfile = join(ctx.stateDir, "logs", step.name,  `run-${filenameSafeDate}.txt`);
+  let logFile = join(ctx.stateDir, "logs", step.name,  `run-${filenameSafeDate}.txt`);
 
-  await ensureDir(dirname(logfile));
+  await ensureDir(dirname(logFile));
   step.transition(StepState.running);
   let run = new StepRun(startTime);
-  run.logFile = logfile;
+  run.logFile = logFile;
   step.runs.unshift(run);
 
   while (step.runs.length > MAX_RUNS_TO_RETAIN) {
@@ -196,31 +206,37 @@ async function runStep(ctx: Context, step: Step) : Promise<void> {
 
   await ctx.save();
 
+  let cwd = step.cwd ?? dirname(ctx.flowFile);
+
   info(`[${step.name}] Starting step ${step.name} at ${startTime.toISOString()}`);
   trace(`[${step.name}]     cmd: ${step.cmd}`);
-  trace(`[${step.name}]     cwd: ${step.cwd}`);
+  trace(`[${step.name}]     cwd: ${cwd}`);
 
-  for (let [env,val] of Object.entries(ctx.flow.env)) { Deno.env.set(env, val); }
-  for (let [env,val] of Object.entries(step.env))     { Deno.env.set(env, val); }
+  let globalenv = Array.from(ctx.flow.env.entries()).map(([env,val]) => `export ${env}=${val}`).join("\n");
+  let localenv  = Array.from(step.env.entries()).map(([env,val]) => `export ${env}=${val}`).join("\n");
+
+  let scriptFile = join(ctx.stateDir, "scripts", `${step.name}.bash`);
+  await ensureDir(dirname(scriptFile));
+
+  let scriptContents =`
+set -e -o pipefail
+exec 2>&1 >${logFile}
+${globalenv}
+${localenv}
+cd ${cwd}
+${step.cmd}`;
+
+  await Deno.writeTextFile(scriptFile, scriptContents);
+  
   let p = Deno.run({
-    cmd: [ "sh", "-c", step.cmd ],
-    cwd: step.cwd,
+    cmd: [ "bash", scriptFile ],
     stdin: "null",
-    stdout: "piped",
-    stderr: "piped",
+    stdout: "inherit",
+    stderr: "inherit",
   });
 
-  let logFileStream = await Deno.open(logfile, { write: true, create: true, append: true });
-
   try {
-    let [stdout1, stdout2] = p.stdout!.readable.tee();
-    let [stderr1, stderr2] = p.stderr!.readable.tee();
-
-    let mergePromise = mergeStreams(stdout1, stderr1, logFileStream);
-    let logPromise = logSubprocessToConsole(step.name, stdout2, stderr2);
-
     let exitCode = await p.status();
-    await Promise.all([mergePromise, logPromise]);
 
     run.exitCode = exitCode.code;
     run.endTimestamp = new Date();
@@ -240,19 +256,18 @@ async function runStep(ctx: Context, step: Step) : Promise<void> {
 
     ctx.flow.clean();
     await ctx.save();
-    runLoop(ctx);
+    runLoop(activeSteps, ctx);
 
   } finally {
-    await logFileStream.close();
     try { p.kill("SIGKILL"); } catch { }
   }
 }
 
-function runLoop(ctx: Context) {
+function runLoop(activeSteps: Step[], ctx: Context) {
   let waitingForRunSteps = ctx.flow.steps.filter(step => step.state == StepState.waitingForRun);
 
   for (let step of waitingForRunSteps) {
-    ctx.pending.push(runStep(ctx, step));
+    ctx.pending.push(runStep(activeSteps, ctx, step));
   }
 }
 
@@ -270,6 +285,8 @@ async function cmdRun(ctx: Context, args: string[]) : Promise<void> {
     ctx.save();
   }
 
+  let activeSteps : Step[] = [];
+
   if (args.length > 0) {
     console.error("run doesn't take any arguments");
     Deno.exit(1);
@@ -282,11 +299,38 @@ async function cmdRun(ctx: Context, args: string[]) : Promise<void> {
     Deno.exit(0);
   }
 
-  runLoop(ctx);
+  runLoop(activeSteps, ctx);
 
+  let interval = setInterval(() => { 
+    let runningStepStatuses: string[] = [];
+    let notRunningStepStatuses: string[]  = [];
+
+    activeSteps.sort((a,b) => a.runs[0].startTimestamp.getTime() - b.runs[0].startTimestamp.getTime());
+    let runningSteps    = activeSteps.filter(x => x.state == StepState.running);
+    let notRunningSteps = activeSteps.filter(x => x.state != StepState.running);
+
+    let now = new Date();
+    for (let step of runningSteps) {
+      let run = step.runs[0];
+        let elapsed = now.getTime() - run.startTimestamp.getTime();
+        runningStepStatuses.push(`${getColorizer(step.state)(step.name)} (${formatDuration(elapsed)})`);
+    }
+
+    for (let step of notRunningSteps) {
+      //stepStatuses.push(`${getColorizer(step.state)(step.name)} (${formatDistance(run.endTimestamp!, now, { addSuffix: true })})`);
+      notRunningStepStatuses.push(`${getColorizer(step.state)(step.name)}`);
+    }
+
+    let sections = [ notRunningStepStatuses, runningStepStatuses ].filter(x => x.length > 0);
+    let joined   = sections.map(x => x.join(" ")).join(" <= ");
+    let statusLine = `[ ${joined} ]\r`
+
+    Deno.writeAllSync(Deno.stdout, new TextEncoder().encode(statusLine));
+  }, 100);
   while (ctx.pending.length > 0) {
     await ctx.waitAll();
   }
+  clearInterval(interval);
 
   ctx.logStatus();
 
@@ -400,6 +444,11 @@ async function main() {
       let [key, value] = args.shift()!.split("=");
       Deno.env.set(key, value);
     }
+    if (args[0] == '--debug') {
+        info("Enabling debug mode");
+        args.shift();
+        setDebug(true);
+    }
   }
 
   if (args.length == 0) { usage(); }
@@ -416,20 +465,26 @@ async function main() {
 
   let ctx      = new Context(flow, state, flowFile, stateDir);
 
-  flow.clean();
-
   if (command == "run") {
+    flow.clean();
     await cmdRun(ctx, args);
+
   } else if (command == "reset") {
+    flow.clean();
     await cmdReset(ctx, args);
+
   } else if (command == "purge") {
     await cmdPurge(ctx, args);
+
   } else if (command == "status") {
     ctx.logStatus();
+
   } else if (command == "inspect") {
     await cmdInspect(ctx, args);
+
   } else if (command == "logs") {
     await cmdLogs(ctx, args);
+
   } else {
     console.error("Unknown command: " + command);
   }

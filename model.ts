@@ -56,6 +56,7 @@ export class Step {
     if (this.isDirty) {
       debug(`  REALLY cleaning ${this.name}`);
       for (let dep of this.deps) {
+          debug(`    cleaning dep ${this.name}=>${dep.name}`);
         dep.clean();
       }
 
@@ -143,7 +144,12 @@ export class Flow {
 
     for (let step of this.steps) {
       let stepToml = flowToml.steps[step.name]!;
-      step.deps = (stepToml.deps ?? []).map((dep) => stepsByName.get(dep)!);
+      step.deps = [];
+      for (let stepName of stepToml.deps ?? []) {
+          let dep = stepsByName.get(stepName);
+          if (!dep) throw new Error(`Step not found when processing dependencies: ${stepName}`);
+          step.deps.push(dep);
+      }
     }
 
     for (let step of this.steps) {
