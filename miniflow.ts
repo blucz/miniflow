@@ -88,7 +88,7 @@ class Context {
     }
   }
 
-  public logFlow(): void {
+  public logStatus(): void {
     info(`---[ Flow Status ]----------------------------`);
     for (let step of this.flow.steps) {
       let colorstate = step.state.toString();
@@ -278,7 +278,7 @@ async function cmdRun(ctx: Context, args: string[]) : Promise<void> {
   let waitingForRunSteps = ctx.flow.steps.filter(step => step.state == StepState.waitingForRun);
   if (waitingForRunSteps.length == 0) {
     info("Nothing to do");
-    ctx.logFlow();
+    ctx.logStatus();
     Deno.exit(0);
   }
 
@@ -288,7 +288,7 @@ async function cmdRun(ctx: Context, args: string[]) : Promise<void> {
     await ctx.waitAll();
   }
 
-  ctx.logFlow();
+  ctx.logStatus();
 
   if (ctx.flow.steps.filter(step => step.state == StepState.failed).length > 0) {
     Deno.exit(1);
@@ -325,6 +325,7 @@ async function cmdInspect(ctx: Context, args: string[]) : Promise<void> {
       deps: step.deps.map(dep => dep.name),
       cmd: truncateOneLine(step.cmd),
       cwd: step.cwd,
+      desc: step.desc,
       lastRun: step.runs.length == 0 ? "(not run yet)" : prepareRunForDisplay(step.runs[0]),
       env: Object.fromEntries(step.env),
     })),
@@ -367,7 +368,7 @@ async function cmdReset(ctx: Context, args: string[]) : Promise<void> {
   ctx.flow.clean();
   await ctx.save();
 
-  ctx.logFlow();
+  ctx.logStatus();
 }
 
 async function cmdPurge(ctx: Context, args: string[]) : Promise<void> {
@@ -424,7 +425,7 @@ async function main() {
   } else if (command == "purge") {
     await cmdPurge(ctx, args);
   } else if (command == "status") {
-    ctx.logFlow();
+    ctx.logStatus();
   } else if (command == "inspect") {
     await cmdInspect(ctx, args);
   } else if (command == "logs") {

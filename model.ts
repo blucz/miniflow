@@ -19,9 +19,10 @@ export class Step {
     this.env  = new Map(Object.entries(stepToml.env ?? {}));
     this.cmd  = stepToml.cmd;
     this.cwd  = stepToml.cwd;
+    this.desc = stepToml.desc;
     this.deps = [];
 
-    ensureOnlyKeys(stepToml, [ "env", "cmd", "deps", "cwd" ], `in step ${name}`);
+    ensureOnlyKeys(stepToml, [ "desc", "env", "cmd", "deps", "cwd" ], `in step ${name}`);
 
     if (state) {
       this.state = state.state;
@@ -42,6 +43,7 @@ export class Step {
   public isDirty: boolean;
   public state: StepState;
   public runs: StepRun[];
+  public desc: string | undefined;
 
   public deps: Step[] = [];
 
@@ -255,6 +257,7 @@ export interface StepToml {
   env: { [key: string]: string };
   cmd: string;
   cwd: string;
+  desc?: string;
   deps: string[];
 }
 
