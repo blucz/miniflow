@@ -3,9 +3,9 @@
 Airflow like workflow automation for the command prompt. 
 
 
+```
 Usage: miniflow <command> [args...]
 
-```
 COMMANDS
 
    run                       Run the flow, attempting to make progress based on the current state.
