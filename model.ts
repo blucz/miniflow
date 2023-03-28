@@ -13,6 +13,11 @@ export enum StepState {
   failed        = 'failed' 
 }
 
+export enum LogMode {
+    file = 'file',
+    console = 'console',
+}
+
 export class Step {
   constructor(name: string, stepToml: StepToml, state?: StepStateJson) {
     this.name = name;
@@ -22,7 +27,17 @@ export class Step {
     this.desc = stepToml.desc;
     this.deps = [];
 
-    ensureOnlyKeys(stepToml, [ "desc", "env", "cmd", "deps", "cwd" ], `in step ${name}`);
+    ensureOnlyKeys(stepToml, [ "desc", "env", "cmd", "deps", "cwd", "log" ], `in step ${name}`);
+
+    if (stepToml.log == undefined) {
+        this.logMode = LogMode.file;
+    } else if (stepToml.log == LogMode.console) {
+        this.logMode = LogMode.console;
+    } else if (stepToml.log == LogMode.file) {
+        this.logMode = LogMode.file;
+    } else {
+        throw new Error(`invalid log mode ${stepToml.log} in step ${name}`);
+    }
 
     if (state) {
       this.state = state.state;
@@ -44,6 +59,7 @@ export class Step {
   public state: StepState;
   public runs: StepRun[];
   public desc: string | undefined;
+  public logMode : LogMode;
 
   public deps: Step[] = [];
 
@@ -265,5 +281,6 @@ export interface StepToml {
   cwd: string;
   desc?: string;
   deps: string[];
+  log: string;
 }
 

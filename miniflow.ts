@@ -5,7 +5,7 @@ import { formatDistance } from "https://cdn.skypack.dev/date-fns";
 import * as toml from "https://deno.land/std@0.180.0/encoding/toml.ts";
 import * as colors from "https://deno.land/std@0.179.0/fmt/colors.ts";
 
-import { FlowToml, StateJson, Flow, Step, StepState, StepRun } from "./model.ts";
+import { FlowToml, StateJson, Flow, Step, StepState, StepRun, LogMode } from "./model.ts";
 import { formatDuration, truncateOneLine, mergeStreams } from "./utils.ts";
 
 import { info, trace, error, debug, setDebug } from "./log.ts";
@@ -116,7 +116,7 @@ class Context {
       if (step.runs.length > 0 && (step.state == StepState.succeeded || step.state == StepState.failed)) {
         let run = step.runs[0];
         if (step.state == StepState.succeeded || step.state == StepState.failed) {
-          runinfo = colors.gray(`finished with exit code [${run.exitCode}] after ${formatDuration(run.durationMs!)} (${formatDistance(run.endTimestamp, new Date(), { addSuffix: true })})`);
+          runinfo = colors.gray(`exit(${run.exitCode}) after ${formatDuration(run.durationMs!)} (${formatDistance(run.endTimestamp, new Date(), { addSuffix: true })})`);
         } else {
           runinfo = colors.gray(`Running as of ${formatDistance(run.startTimestamp, new Date(), { addSuffix: true })}`);
         }
@@ -190,6 +190,7 @@ async function runStep(activeSteps: Step[], ctx: Context, step: Step) : Promise<
   let startTime = new Date();
   const filenameSafeDate = startTime.toISOString().replace(/:/g, "-").replace(/\./g, "-");
   let logFile = join(ctx.stateDir, "logs", step.name,  `run-${filenameSafeDate}.txt`);
+  let latestLogFile = join(ctx.stateDir, "logs", step.name,  `run.txt`);
 
   await ensureDir(dirname(logFile));
   step.transition(StepState.running);
@@ -218,9 +219,13 @@ async function runStep(activeSteps: Step[], ctx: Context, step: Step) : Promise<
   let scriptFile = join(ctx.stateDir, "scripts", `${step.name}.bash`);
   await ensureDir(dirname(scriptFile));
 
+  let logStuff = step.logMode == LogMode.file ? `exec 2>&1 >${logFile}
+rm -f ${latestLogFile}
+ln -s \`realpath ${logFile}\` ${latestLogFile}` : "";
+
   let scriptContents =`
 set -e -o pipefail
-exec 2>&1 >${logFile}
+${logStuff}
 ${globalenv}
 ${localenv}
 cd ${cwd}
@@ -231,8 +236,6 @@ ${step.cmd}`;
   let p = Deno.run({
     cmd: [ "bash", scriptFile ],
     stdin: "null",
-    stdout: "inherit",
-    stderr: "inherit",
   });
 
   try {
