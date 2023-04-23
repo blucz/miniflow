@@ -5,7 +5,7 @@ import { formatDistance } from "https://cdn.skypack.dev/date-fns";
 import * as toml from "https://deno.land/std@0.180.0/encoding/toml.ts";
 import * as colors from "https://deno.land/std@0.179.0/fmt/colors.ts";
 
-import { FlowToml, StateJson, Flow, Step, StepState, StepRun, LogMode } from "./model.ts";
+import { FlowToml, StateJson, Flow, Step, StepState, StepRun, LogMode, parseStepState } from "./model.ts";
 import { formatDuration, truncateOneLine, mergeStreams } from "./utils.ts";
 
 import { info, trace, error, debug, setDebug } from "./log.ts";
@@ -17,6 +17,17 @@ const STATE_DIR_NAME        = `_${APP_NAME}`;
 const DEFAULT_STATE         = { version: 1, steps: { } };
 const MAX_RUNS_TO_RETAIN    = 10;
 
+function printStates() {
+  console.error("   - none");
+  console.error("   - waiting-for-run");
+  console.error("   - waiting-for-dependency");
+  console.error("   - dependency-failed");
+  console.error("   - succeeded");
+  console.error("   - running");
+  console.error("   - failed");
+  console.error("   - disabled");
+}
+
 function usage() {
   console.error(`Usage: ${APP_NAME} <command> [args...]`);
   console.error("");
@@ -24,14 +35,21 @@ function usage() {
   console.error("");
   console.error("   run                       Run the flow, attempting to make progress based on the current state.");
   console.error("   reset [--only] [step]...  Reset a step + its dependents. If no step is provided, reset all steps");
+  console.error("   set [state] [step]....    Manually set steps to a certain state")
+  console.error("   disable [step...]         Disable steps. ")
+  console.error("   enable [step...]          Re-enable steps. They will be restored to the last prior non-disabled state")
   console.error("   purge                     Clear all state associated with this flow and start from scratch");
   console.error("   status                    Show short-form flow status");
   console.error("   inspect                   Show detailed information about the flow for debugging");
   console.error("   logs [step]               Print logs from the last run of a step");
   console.error("");
+  console.error("STATES");  
+  console.error("");
+  printStates();
+  console.error("");
   console.error("OPTIONS"); 
   console.error("");
-  console.error(`    -d --flow <${DEFAULT_FLOW_FILENAME}>  Specify the flow file to use. Defaults to ${DEFAULT_FLOW_FILENAME}`);
+  console.error(`    -f --flow <${DEFAULT_FLOW_FILENAME}>  Specify the flow file to use. Defaults to ${DEFAULT_FLOW_FILENAME}`);
   console.error("    -e --env 'KEY=value'       Set an environment variable");
   console.error("    -h --help                  Show this help message");
   console.error("");
@@ -44,6 +62,7 @@ function usage() {
   console.error("    cmd = 'echo hello'           # Command to run");
   console.error("    cwd = '.'                    # Working directory (optional, defaults to flow file directory)");
   console.error("    env = { 'ENV_VAR': 'value' } # Environment variables (optional)");
+  console.error("    tags = [ 'tag1', ... ]       # Tags (optional)");
   console.error("");
   console.error("    [steps.print-world]");
   console.error("    desc = 'Prints \"world\"'     # Short human-readbale description of what the step does");
@@ -51,6 +70,7 @@ function usage() {
   console.error("    deps = ['print-hello']        # List of steps that this step depends on");
   console.error("    cwd  = '.'                    # Working directory (optional, defaults to flow file directory)");
   console.error("    env  = { 'ENV_VAR': 'value' } # Environment variables (optional)");
+  console.error("    tags = [ 'tag1', ... ]       # Tags (optional)");
   console.error("");
   console.error("NOTES");
   console.error("");
@@ -223,6 +243,8 @@ async function runStep(activeSteps: Step[], ctx: Context, step: Step) : Promise<
 rm -f ${latestLogFile}
 ln -s \`realpath ${logFile}\` ${latestLogFile}` : "";
 
+  info(`Logs for step ${step.name} will be written to ${logFile}`);
+
   let scriptContents =`
 set -e -o pipefail
 ${logStuff}
@@ -368,6 +390,7 @@ async function cmdInspect(ctx: Context, args: string[]) : Promise<void> {
     finalSteps: ctx.flow.finalSteps.map(step => step.name),
     steps: ctx.flow.steps.map(step => ({
       name: step.name,
+      tags: step.tags,
       state: step.state,
       deps: step.deps.map(dep => dep.name),
       cmd: truncateOneLine(step.cmd),
@@ -388,17 +411,10 @@ async function cmdReset(ctx: Context, args: string[]) : Promise<void> {
   }
 
   let stepNames = args;
-  let steps = [];
+  let steps: Array<Step>;
 
   if (stepNames.length > 0) {
-    for (let stepName of stepNames) {
-      let step = ctx.flow.steps.find(x => x.name == stepName);
-      if (!step) {
-        console.error(`Error: step ${stepName} does not exist`);
-        Deno.exit(1);
-      }
-      steps.push(step);
-    }
+    steps = ctx.flow.resolveSteps(stepNames);
   } else {
     steps = ctx.flow.steps;
   }
@@ -410,6 +426,72 @@ async function cmdReset(ctx: Context, args: string[]) : Promise<void> {
         desc.transition(StepState.none);
       }
     }
+  }
+
+  ctx.flow.clean();
+  await ctx.save();
+
+  ctx.logStatus();
+}
+
+async function cmdDisable(ctx: Context, args: string[]) : Promise<void> {
+  let only = false;
+
+  let stepNames = args;
+  let steps = ctx.flow.resolveSteps(stepNames);
+
+  if (steps.length == 0) {
+    console.error(`Error: no steps provided`);
+    Deno.exit(1);
+  }
+
+  for (let step of steps) {
+    step.transition(StepState.disabled);
+  }
+
+  ctx.flow.clean();
+  await ctx.save();
+
+  ctx.logStatus();
+}
+
+async function cmdEnable(ctx: Context, args: string[]) : Promise<void> {
+  let only = false;
+
+  let stepNames = args;
+  let steps = ctx.flow.resolveSteps(stepNames);
+
+  if (steps.length == 0) {
+    console.error(`Error: no steps provided`);
+    Deno.exit(1);
+  }
+
+  for (let step of steps) {
+    step.transition(step.prevState ?? StepState.none);
+  }
+
+  ctx.flow.clean();
+  await ctx.save();
+
+  ctx.logStatus();
+}
+
+async function cmdSet(ctx: Context, args: string[]) : Promise<void> {
+  let only = false;
+
+  if (args.length < 2) {
+      console.error(`Error: expected state and steps. Valid steps include:`);
+      console.error("");
+      printStates();
+      Deno.exit(1);
+  }
+
+  let state = parseStepState(args.shift()!);
+  let stepNames = args;
+  let steps = ctx.flow.resolveSteps(stepNames);
+
+  for (let step of steps) {
+    step.transition(state);
   }
 
   ctx.flow.clean();
@@ -435,6 +517,7 @@ async function main() {
   }
 
   let flowFile = DEFAULT_FLOW_FILENAME;
+  let debug = false;
 
   // Process options
   while (args.length > 0 && args[0].startsWith("-")) {
@@ -451,6 +534,7 @@ async function main() {
         info("Enabling debug mode");
         args.shift();
         setDebug(true);
+        debug = true;
     }
   }
 
@@ -462,34 +546,58 @@ async function main() {
       Deno.exit(1);
   }
 
-  let stateDir = await ensureStateDir(flowFile);
-  let state    = await loadState(stateDir);
-  let flow     = await loadFlow(flowFile, state);
+  async function body(): Promise<void> {
+    let stateDir = await ensureStateDir(flowFile);
+    let state    = await loadState(stateDir);
+    let flow     = await loadFlow(flowFile, state);
+    let ctx      = new Context(flow, state, flowFile, stateDir);
 
-  let ctx      = new Context(flow, state, flowFile, stateDir);
+    if (command == "run") {
+      flow.clean();
+      await cmdRun(ctx, args);
 
-  if (command == "run") {
-    flow.clean();
-    await cmdRun(ctx, args);
+    } else if (command == "reset") {
+      flow.clean();
+      await cmdReset(ctx, args);
 
-  } else if (command == "reset") {
-    flow.clean();
-    await cmdReset(ctx, args);
+    } else if (command == "set") {
+      flow.clean();
+      await cmdSet(ctx, args);
 
-  } else if (command == "purge") {
-    await cmdPurge(ctx, args);
+    } else if (command == "disable") {
+      flow.clean();
+      await cmdDisable(ctx, args);
 
-  } else if (command == "status") {
-    ctx.logStatus();
+    } else if (command == "enable") {
+      flow.clean();
+      await cmdEnable(ctx, args);
 
-  } else if (command == "inspect") {
-    await cmdInspect(ctx, args);
+    } else if (command == "purge") {
+      await cmdPurge(ctx, args);
 
-  } else if (command == "logs") {
-    await cmdLogs(ctx, args);
+    } else if (command == "status") {
+      ctx.logStatus();
 
+    } else if (command == "inspect") {
+      await cmdInspect(ctx, args);
+
+    } else if (command == "logs") {
+      await cmdLogs(ctx, args);
+
+    } else {
+      console.error("Unknown command: " + command);
+    }
+  }
+
+  if (debug) {
+    await body();
   } else {
-    console.error("Unknown command: " + command);
+    try {
+      await body();
+    } catch (e) {
+      console.error(`Error: ${e.message}`);
+      Deno.exit(1);
+    }
   }
 }
 

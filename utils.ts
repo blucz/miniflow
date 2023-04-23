@@ -31,7 +31,6 @@ export function ensureOnlyKeys(obj: any, validKeys: string[], where: string) {
   }
 }
 
-
 export async function mergeStreams(stream1: ReadableStream, stream2: ReadableStream, writer: Deno.Writer): Promise<void> {
   const iterator1 = stream1[Symbol.asyncIterator]();
   const iterator2 = stream2[Symbol.asyncIterator]();

@@ -10,7 +10,22 @@ export enum StepState {
   depFailed     = 'dependency-failed',
   succeeded     = 'succeeded',
   running       = 'running',
-  failed        = 'failed' 
+  failed        = 'failed',
+  disabled      = 'disabled' 
+}
+
+export function parseStepState(s: string) {
+  switch (s) {
+      case 'none': return StepState.none;         
+      case 'waiting-for-run': return StepState.waitingForRun;
+      case 'waiting-for-dependency': return StepState.waitingForDep;
+      case 'dependency-failed': return StepState.depFailed;    
+      case 'succeeded': return StepState.succeeded;    
+      case 'running': return StepState.running;      
+      case 'failed': return StepState.failed;       
+      case 'disabled': return StepState.disabled;     
+      default: throw new Error(`invalid step state ${s}`);
+  }
 }
 
 export enum LogMode {
@@ -26,8 +41,9 @@ export class Step {
     this.cwd  = stepToml.cwd;
     this.desc = stepToml.desc;
     this.deps = [];
+    this.tags = stepToml.tags ?? []
 
-    ensureOnlyKeys(stepToml, [ "desc", "env", "cmd", "deps", "cwd", "log" ], `in step ${name}`);
+    ensureOnlyKeys(stepToml, [ "desc", "env", "cmd", "deps", "cwd", "log", "tags" ], `in step ${name}`);
 
     if (stepToml.log == undefined) {
         this.logMode = LogMode.file;
@@ -42,13 +58,13 @@ export class Step {
     if (state) {
       this.state = state.state;
       this.runs = (state.runs ?? []).map((run) => StepRun.fromJson(run));
+      this.prevState = state.prevState;
     } else {
       this.state = StepState.none;
       this.runs = [];
     }
 
     this.isDirty = this.state == StepState.none;
-
   }
 
   public name: string;
@@ -57,10 +73,11 @@ export class Step {
   public cwd: string;
   public isDirty: boolean;
   public state: StepState;
+  public prevState?: StepState;
   public runs: StepRun[];
   public desc: string | undefined;
   public logMode : LogMode;
-
+  public tags: string[]
   public deps: Step[] = [];
 
   public ancestors: Set<Step> = new Set();
@@ -82,6 +99,9 @@ export class Step {
       if (this.state == StepState.failed) {
         debug("    nothing to do (failed)");
 
+      } else if (this.state == StepState.disabled) {
+        debug("    nothing to do (disabled)");
+
       } else if (this.state == StepState.running) {
         debug("    nothing to do (running)");
 
@@ -95,7 +115,8 @@ export class Step {
 
       } else if (depStates.includes(StepState.running) ||
                  depStates.includes(StepState.waitingForDep) ||
-                 depStates.includes(StepState.waitingForRun)) {
+                 depStates.includes(StepState.waitingForRun) ||
+                 depStates.includes(StepState.disabled)) {
         debug("    case 2 (waitingForDep)");
         this.transition(StepState.waitingForDep);
 
@@ -110,6 +131,7 @@ export class Step {
       } else if (depStates.every(s => s == StepState.succeeded)) {
         debug("    case 5 (all deps success)");
         this.transition(StepState.waitingForRun);
+
       } else {
         debug("    fallthrough");
       }
@@ -125,6 +147,7 @@ export class Step {
   public transition(state: StepState) {
     if (state == this.state) return;
     trace(`[${this.name}] ${this.state} => ${state}`);
+    this.prevState = this.state;
     this.state = state;
     this.dirty();
   }
@@ -158,14 +181,47 @@ export class Flow {
 
     let stepsByName = new Map(this.steps.map((step) => [step.name, step]));
 
+    let errors = [];
+
+    let cyclicalDepErrors: Array<string> = [];
     for (let step of this.steps) {
       let stepToml = flowToml.steps[step.name]!;
       step.deps = [];
-      for (let stepName of stepToml.deps ?? []) {
-          let dep = stepsByName.get(stepName);
-          if (!dep) throw new Error(`Step not found when processing dependencies: ${stepName}`);
-          step.deps.push(dep);
+      if (stepToml.deps && !Array.isArray(stepToml.deps)) {
+        errors.push(`step.deps must be an array in step ${step.name}`);
+      } else {
+        for (let stepName of stepToml.deps ?? []) {
+            let dep = stepsByName.get(stepName);
+            if (dep) {
+              step.deps.push(dep);
+            } else {
+              errors.push(`Dependency not found: ${step.name} => ${stepName}`);
+            }
+        }
       }
+    }
+
+    function checkCycles(step: Step, seen: Set<Step> = new Set()) {
+      if (seen.has(step)) {
+        cyclicalDepErrors.push(`${[...seen, step].map((s) => s.name).join(" => ")}`);
+        return;
+      }
+      seen.add(step);
+      for (let dep of step.deps) {
+        checkCycles(dep, seen);
+      }
+      seen.delete(step);
+    }
+    for (let step of this.steps) {
+      checkCycles(step);
+    }
+
+    if (cyclicalDepErrors.length > 0) {
+      errors.push(`Cyclical dependencies found: ${cyclicalDepErrors.join(", ")}`);
+    }
+
+    if (errors.length > 0) {
+      throw new Error(errors.join("\n"));
     }
 
     for (let step of this.steps) {
@@ -210,8 +266,23 @@ export class Flow {
       stateJson.steps[step.name] = {
         runs:  step.runs.map((run) => run.toJson()),
         state: step.state,
+        prevState: step.prevState,
       };
     }
+  }
+
+  public resolveSteps(stepNames: Array<string>) : Array<Step> {
+    const steps = [];
+    for (let stepName of stepNames) {
+      let found = this.steps.filter(x => x.name == stepName || x.tags.includes(stepName));
+      for (let step of found) {
+        steps.push(step);
+      }
+      if (found.length == 0) {
+        throw new Error(`Error: couldn't find any steps for ${stepName}`);
+      }
+    }
+    return steps;
   }
 }
 
@@ -262,6 +333,7 @@ export interface StepRunJson {
 
 export interface StepStateJson {
   state: StepState;
+  prevState?: StepState;
   runs: StepRunJson[];
 }
 
@@ -281,6 +353,7 @@ export interface StepToml {
   cwd: string;
   desc?: string;
   deps: string[];
+  tags?: string[];
   log: string;
 }
 
